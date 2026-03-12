@@ -1,0 +1,184 @@
+"""
+Certificate Generator
+=====================
+Generates individual PDF certificates from an Excel sheet using a PDF template.
+
+Requirements:
+    pip install pandas openpyxl pymupdf
+
+Excel columns expected: name, designation, job, title, title_2
+Usage:
+    1. Edit the CONFIG section below.
+    2. Run:  python generate_certificates.py
+"""
+
+import os
+import re
+import pandas as pd
+import fitz  # PyMuPDF
+from collections import defaultdict
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIG  –  edit these values to suit your project
+# ─────────────────────────────────────────────────────────────────────────────
+
+EXCEL_FILE   = r"c:\Users\user\Downloads\DOC-20260305-WA0019.xlsx"
+TEMPLATE_PDF = r"c:\Users\user\Downloads\oseal1.pdf"
+OUTPUT_DIR   = r"c:\Users\user\Downloads\new1"
+
+# Vertical positions as a fraction of page height (0.0=top, 1.0=bottom).
+# Adjust y_frac values to align with your template layout.
+FIELDS = [
+    {"column": "name",        "y_frac": 0.46, "font_size": 26, "bold": True},
+    {"column": "title",       "y_frac": 0.57, "font_size": 12, "bold": True},
+    {"column": "designation", "y_frac": 0.49, "font_size": 12, "bold": False},
+    {"column": "job",         "y_frac": 0.53, "font_size": 12, "bold": False},
+    {"column": "title_2",     "y_frac": 0.60, "font_size": 12, "bold": True},
+]
+
+# Text colour: (Red, Green, Blue) each between 0.0 and 1.0
+# Examples:
+#   (0.0, 0.0, 0.0)   -> black
+#   (0.1, 0.1, 0.4)   -> dark navy
+#   (0.8, 0.1, 0.1)   -> red
+#   (0.85, 0.65, 0.1) -> gold
+TEXT_COLOR = (0.067, 0.294, 0.514)
+
+# FONT - choose ONE of the options below:
+#
+# Option A - path to a .ttf or .otf font file on your computer
+#   FONT = r"C:\Windows\Fonts\Georgia.ttf"
+#   FONT = r"C:\Windows\Fonts\arial.ttf"
+#   FONT = r"C:\Windows\Fonts\arialbd.ttf"   (Arial Bold)
+#   FONT = r"C:\Windows\Fonts\times.ttf"
+#   FONT = r"C:\Windows\Fonts\calibri.ttf"
+#
+# Option B - PyMuPDF built-in font (no file needed)
+#   "helv"  Helvetica        "hebo"  Helvetica Bold
+#   "heit"  Helvetica Italic "hebi"  Helvetica Bold-Italic
+#   "tiro"  Times Roman      "tibd"  Times Bold
+#   "cour"  Courier          "cobo"  Courier Bold
+#
+FONT = r"c:\Users\user\Downloads\LibreBaskerville-SemiBold.ttf"   # <- change this
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def sanitise_filename(name: str) -> str:
+    name = str(name).strip()
+    return re.sub(r'[\\/*?:"<>|]', "_", name)
+
+
+def is_blank(value) -> bool:
+    """Return True if the cell value is empty, NaN, or whitespace-only."""
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip() == ""
+
+
+def exact_text_width(text: str, font_size: float) -> float:
+    """Measure exact rendered width using real font glyph metrics."""
+    if os.path.isfile(FONT):
+        font = fitz.Font(fontfile=FONT)
+    else:
+        font = fitz.Font(fontname=FONT)
+    return font.text_length(text, fontsize=font_size)
+
+
+def setup_font(page) -> str:
+    """Embed / register the font on the page and return the alias."""
+    if os.path.isfile(FONT):
+        page.insert_font(fontname="F0", fontfile=FONT)
+        return "F0"
+    return FONT
+
+
+def draw_centred_text(page, text: str, y: float,
+                      font_ref: str, font_size: float, color: tuple):
+    """Draw text perfectly centred using true mediabox boundaries."""
+    mb         = page.mediabox
+    page_x0    = mb.x0
+    page_width = mb.width
+
+    tw = exact_text_width(text, font_size)
+    x  = page_x0 + (page_width - tw) / 2
+
+    page.insert_text(
+        fitz.Point(x, y),
+        text,
+        fontname=font_ref,
+        fontsize=font_size,
+        color=color,
+    )
+
+
+def build_output_path(name: str, name_counts: dict) -> str:
+    """
+    Return a unique output path for this certificate.
+
+    - First occurrence  → "John Smith.pdf"
+    - Second occurrence → "John Smith_2.pdf"
+    - Third occurrence  → "John Smith_3.pdf"
+    - and so on …
+    """
+    safe_name = sanitise_filename(name)
+    name_counts[safe_name] += 1
+    count = name_counts[safe_name]
+
+    filename = f"{safe_name}.pdf" if count == 1 else f"{safe_name}_{count}.pdf"
+    return os.path.join(OUTPUT_DIR, filename)
+
+
+def generate_certificates():
+    if not os.path.exists(EXCEL_FILE):
+        raise FileNotFoundError(f"Excel file not found: {EXCEL_FILE}")
+    if not os.path.exists(TEMPLATE_PDF):
+        raise FileNotFoundError(f"Template PDF not found: {TEMPLATE_PDF}")
+
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    df = pd.read_excel(EXCEL_FILE)
+    df.columns = [c.strip().lower() for c in df.columns]
+
+    required = {"name", "designation", "job", "title", "title_2"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Excel is missing columns: {missing}")
+
+    # Track how many times each name has appeared so far
+    name_counts = defaultdict(int)
+
+    generated = 0
+    for _, row in df.iterrows():
+        doc  = fitz.open(TEMPLATE_PDF)
+        page = doc[0]
+
+        font_ref    = setup_font(page)
+        page_height = page.mediabox.height
+
+        for field in FIELDS:
+            cell = row.get(field["column"])
+            if is_blank(cell):
+                continue
+
+            value = str(cell).strip()
+            y_abs = page.mediabox.y0 + page_height * field["y_frac"]
+            draw_centred_text(page, value, y_abs,
+                              font_ref, field["font_size"], TEXT_COLOR)
+
+        out_path = build_output_path(row["name"], name_counts)
+        doc.save(out_path)
+        doc.close()
+        generated += 1
+        print(f"  OK  {out_path}")
+
+    print(f"\nDone! {generated} certificate(s) saved to '{OUTPUT_DIR}/'")
+
+
+if __name__ == "__main__":
+    generate_certificates()
