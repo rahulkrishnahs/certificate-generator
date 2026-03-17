@@ -2,7 +2,7 @@
 Certificate Generator
 =====================
 Generates individual PDF certificates from an Excel sheet using a PDF template.
-
+Made by Rahul Krishna H S
 Requirements:
     pip install pandas openpyxl pymupdf
 
